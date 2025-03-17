@@ -13,14 +13,14 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL")
-UPSTASH_REDIS_TOKEN = os.getenv("UPSTASH_REDIS_TOKEN")
+REDIS_URL = os.getenv("REDIS_URL")   
+REDIS_TOKEN = os.getenv("REDIS_TOKEN") 
 HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 MAX_CONTEXT_LENGTH = 100  # Максимальное число сообщений в контексте
 
 # Заголовки для Upstash Redis REST API
 REDIS_HEADERS = {
-    "Authorization": f"Bearer {UPSTASH_REDIS_TOKEN}",
+    "Authorization": f"Bearer {REDIS_TOKEN}",  # Используем REDIS_TOKEN
     "Content-Type": "application/json"
 }
 
