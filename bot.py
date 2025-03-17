@@ -31,7 +31,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Сохраняем сообщение в Redis через REST API
         redis_key = f"chat:{chat_id}"
-        lpush_url = f"{UPSTASH_REDIS_REST_URL}/lpush/{redis_key}"
+        lpush_url = f"{os.getenv('REDIS_URL')}/lpush/{redis_key}"
         response = requests.post(
             lpush_url,
             headers=REDIS_HEADERS,
@@ -43,11 +43,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raise Exception("Redis error")
 
         # Обрезаем список до MAX_CONTEXT_LENGTH элементов
-        ltrim_url = f"{UPSTASH_REDIS_REST_URL}/ltrim/{redis_key}/0/{MAX_CONTEXT_LENGTH-1}"
+        ltrim_url = f"{os.getenv('REDIS_URL')}/ltrim/{redis_key}/0/{MAX_CONTEXT_LENGTH-1}"
         requests.post(ltrim_url, headers=REDIS_HEADERS)
 
         # Получаем контекст (последние MAX_CONTEXT_LENGTH сообщений)
-        lrange_url = f"{UPSTASH_REDIS_REST_URL}/lrange/{redis_key}/0/{MAX_CONTEXT_LENGTH}"
+        lrange_url = f"{os.getenv('REDIS_URL')}/lrange/{redis_key}/0/{MAX_CONTEXT_LENGTH}"
         context_response = requests.get(lrange_url, headers=REDIS_HEADERS)
         
         if context_response.status_code != 200:
