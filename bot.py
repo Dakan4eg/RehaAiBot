@@ -3,25 +3,7 @@ import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 import requests
-import httpx
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        # ...
-        async with httpx.AsyncClient() as client:
-            # LPUSH
-            lpush_response = await client.post(
-                lpush_url,
-                headers=REDIS_HEADERS,
-                json=[user_message]
-            )
-            
-            # LTRIM
-            await client.post(ltrim_url, headers=REDIS_HEADERS)
-            
-            # LRANGE
-            context_response = await client.get(lrange_url, headers=REDIS_HEADERS)
-            
+       
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
