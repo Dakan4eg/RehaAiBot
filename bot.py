@@ -13,14 +13,14 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-REDIS_URL = os.getenv("REDIS_URL")   
-REDIS_TOKEN = os.getenv("REDIS_TOKEN") 
-HF_API_TOKEN = os.getenv("HF_API_TOKEN")
-MAX_CONTEXT_LENGTH = 100  # Максимальное число сообщений в контексте
+REDIS_URL = os.getenv("REDIS_URL")          # REST Endpoint из Upstash
+REDIS_TOKEN = os.getenv("REDIS_TOKEN")      # REST API Token из Upstash
+HF_API_TOKEN = os.getenv("HF_API_TOKEN")    # Токен Hugging Face
+MAX_CONTEXT_LENGTH = 100                    # Максимальная длина контекста
 
-# Заголовки для Upstash Redis REST API
+# Заголовки для Upstash Redis
 REDIS_HEADERS = {
-    "Authorization": f"Bearer {REDIS_TOKEN}",  # Используем REDIS_TOKEN
+    "Authorization": f"Bearer {REDIS_TOKEN}",
     "Content-Type": "application/json"
 }
 
@@ -29,34 +29,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_message = update.message.text
         chat_id = update.message.chat.id
         
-        # Сохраняем сообщение в Redis через REST API
+        # Проверка и формирование URL Redis
+        if not REDIS_URL:
+            raise ValueError("REDIS_URL не задан в переменных окружения!")
+        
+        redis_url = REDIS_URL.strip()
+        if not redis_url.startswith(("http://", "https://")):
+            redis_url = f"https://{redis_url}"
+            logger.warning("Автоматически добавлен протокол к REDIS_URL")
+
         redis_key = f"chat:{chat_id}"
-        lpush_url = f"{os.getenv('REDIS_URL')}/lpush/{redis_key}"
+        
+        # 1. Сохраняем сообщение в Redis (LPUSH)
+        lpush_url = f"{redis_url}/lpush/{redis_key}"
         response = requests.post(
             lpush_url,
             headers=REDIS_HEADERS,
-            json=[user_message]  # Upstash требует список значений
+            json=[user_message],
+            proxies={},  # Отключаем прокси
+            timeout=10
         )
         
         if response.status_code not in [200, 201]:
             logger.error(f"Redis LPUSH error: {response.text}")
-            raise Exception("Redis error")
+            raise ConnectionError("Ошибка записи в Redis")
 
-        # Обрезаем список до MAX_CONTEXT_LENGTH элементов
-        ltrim_url = f"{os.getenv('REDIS_URL')}/ltrim/{redis_key}/0/{MAX_CONTEXT_LENGTH-1}"
-        requests.post(ltrim_url, headers=REDIS_HEADERS)
+        # 2. Обрезаем список (LTRIM)
+        ltrim_url = f"{redis_url}/ltrim/{redis_key}/0/{MAX_CONTEXT_LENGTH-1}"
+        requests.post(
+            ltrim_url,
+            headers=REDIS_HEADERS,
+            proxies={},
+            timeout=10
+        )
 
-        # Получаем контекст (последние MAX_CONTEXT_LENGTH сообщений)
-        lrange_url = f"{os.getenv('REDIS_URL')}/lrange/{redis_key}/0/{MAX_CONTEXT_LENGTH}"
-        context_response = requests.get(lrange_url, headers=REDIS_HEADERS)
+        # 3. Получаем контекст (LRANGE)
+        lrange_url = f"{redis_url}/lrange/{redis_key}/0/{MAX_CONTEXT_LENGTH}"
+        context_response = requests.get(
+            lrange_url,
+            headers=REDIS_HEADERS,
+            proxies={},
+            timeout=10
+        )
         
-        if context_response.status_code != 200:
-            logger.error(f"Redis LRANGE error: {context_response.text}")
-            context_messages = []
+        context_messages = []
+        if context_response.status_code == 200:
+            context_messages = context_response.json().get("result", [])
         else:
-            context_messages = context_response.json()["result"] or []
+            logger.error(f"Redis LRANGE error: {context_response.text}")
 
-        # Формируем запрос к Hugging Face API
+        # 4. Запрос к Hugging Face
         hf_headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
         payload = {
             "inputs": {
@@ -71,42 +93,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "https://api-inference.huggingface.co/models/microsoft/DialoGPT-large",
                 headers=hf_headers,
                 json=payload,
-                timeout=15  # Таймаут для Hugging Face
+                proxies={},  # Отключаем прокси
+                timeout=15
             )
         except requests.exceptions.Timeout:
-            logger.error("Hugging Face API timeout")
-            await update.message.reply_text("Сервис перегружен, попробуйте позже ⏳")
+            await update.message.reply_text("Сервис перегружен ⏳")
             return
 
         if hf_response.status_code == 200:
             response_data = hf_response.json()
-            if "generated_text" in response_data:
-                bot_response = response_data["generated_text"][:4096]  # Ограничение Telegram
-            else:
-                logger.error(f"Некорректный ответ API: {response_data}")
-                bot_response = "Не понимаю ваш запрос 😕"
+            bot_response = response_data.get("generated_text", "Не понимаю запрос 😕")[:4096]
         else:
-            logger.error(f"API error {hf_response.status_code}: {hf_response.text}")
-            bot_response = "Ошибка генерации ответа 🤖"
+            logger.error(f"Hugging Face API error: {hf_response.text}")
+            bot_response = "Ошибка генерации 🤖"
 
         await update.message.reply_text(bot_response)
 
     except Exception as e:
-        logger.exception(f"Critical error: {e}")
-        await update.message.reply_text("Произошла внутренняя ошибка 😢")
+        logger.exception("Critical error:")
+        await update.message.reply_text("Произошла ошибка 😢")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     error = context.error
-    logger.error(f"Global error handler: {error}", exc_info=error)
-    
-    if isinstance(error, ConnectionError):
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Проблемы с подключением 🔌 Повторяю попытку..."
-        )
+    logger.error(f"Global error: {error}", exc_info=error)
 
 def main():
-    # Инициализация бота с таймаутами
+    # Проверка переменных окружения
+    required_vars = ["TELEGRAM_TOKEN", "REDIS_URL", "REDIS_TOKEN", "HF_API_TOKEN"]
+    for var in required_vars:
+        if not os.getenv(var):
+            logger.critical(f"Переменная окружения {var} не задана!")
+            raise SystemExit(1)
+
+    # Инициализация бота
     application = (
         ApplicationBuilder()
         .token(TELEGRAM_TOKEN)
@@ -117,11 +136,10 @@ def main():
         .build()
     )
 
-    # Регистрация обработчиков
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)
 
-    # Запуск с интервалом опроса
+    # Запуск
     application.run_polling(
         poll_interval=5,
         timeout=25,
