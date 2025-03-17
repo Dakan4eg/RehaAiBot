@@ -40,7 +40,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         redis_key = f"chat:{chat_id}"
         
-        async with httpx.AsyncClient() as client:
+        # Явное отключение прокси
+        async with httpx.AsyncClient(proxies={}) as client:
             # 1. Сохраняем сообщение в Redis (LPUSH)
             lpush_url = f"{redis_url}/lpush/{redis_key}"
             lpush_response = await client.post(
