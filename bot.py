@@ -2,8 +2,8 @@ import os
 import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
-import requests
-       
+import httpx
+
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -31,7 +31,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Проверка и формирование URL Redis
         if not REDIS_URL:
-            raise ValueError("REDIS_URL не задан в переменных окружения!")
+            raise ValueError("REDIS_URL не задан!")
         
         redis_url = REDIS_URL.strip()
         if not redis_url.startswith(("http://", "https://")):
@@ -40,74 +40,63 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         redis_key = f"chat:{chat_id}"
         
-        # 1. Сохраняем сообщение в Redis (LPUSH)
-        lpush_url = f"{redis_url}/lpush/{redis_key}"
-        response = requests.post(
-            lpush_url,
-            headers=REDIS_HEADERS,
-            json=[user_message],
-            proxies={},  # Отключаем прокси
-            timeout=10
-        )
-        
-        if response.status_code not in [200, 201]:
-            logger.error(f"Redis LPUSH error: {response.text}")
-            raise ConnectionError("Ошибка записи в Redis")
-
-        # 2. Обрезаем список (LTRIM)
-        ltrim_url = f"{redis_url}/ltrim/{redis_key}/0/{MAX_CONTEXT_LENGTH-1}"
-        requests.post(
-            ltrim_url,
-            headers=REDIS_HEADERS,
-            proxies={},
-            timeout=10
-        )
-
-        # 3. Получаем контекст (LRANGE)
-        lrange_url = f"{redis_url}/lrange/{redis_key}/0/{MAX_CONTEXT_LENGTH}"
-        context_response = requests.get(
-            lrange_url,
-            headers=REDIS_HEADERS,
-            proxies={},
-            timeout=10
-        )
-        
-        context_messages = []
-        if context_response.status_code == 200:
-            context_messages = context_response.json().get("result", [])
-        else:
-            logger.error(f"Redis LRANGE error: {context_response.text}")
-
-        # 4. Запрос к Hugging Face
-        hf_headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
-        payload = {
-            "inputs": {
-                "text": user_message,
-                "past_user_inputs": context_messages,
-                "generated_responses": []
-            }
-        }
-
-        try:
-            hf_response = requests.post(
-                "https://api-inference.huggingface.co/models/microsoft/DialoGPT-large",
-                headers=hf_headers,
-                json=payload,
-                proxies={},  # Отключаем прокси
-                timeout=15
+        async with httpx.AsyncClient() as client:
+            # 1. Сохраняем сообщение в Redis (LPUSH)
+            lpush_url = f"{redis_url}/lpush/{redis_key}"
+            lpush_response = await client.post(
+                lpush_url,
+                headers=REDIS_HEADERS,
+                json=[user_message],
+                timeout=10
             )
-        except requests.exceptions.Timeout:
-            await update.message.reply_text("Сервис перегружен ⏳")
-            return
+            
+            if lpush_response.status_code not in [200, 201]:
+                logger.error(f"Redis LPUSH error: {lpush_response.text}")
+                raise ConnectionError("Ошибка записи в Redis")
 
-        if hf_response.status_code == 200:
-            response_data = hf_response.json()
-            bot_response = response_data.get("generated_text", "Не понимаю запрос 😕")[:4096]
-        else:
-            logger.error(f"Hugging Face API error: {hf_response.text}")
-            bot_response = "Ошибка генерации 🤖"
+            # 2. Обрезаем список (LTRIM)
+            ltrim_url = f"{redis_url}/ltrim/{redis_key}/0/{MAX_CONTEXT_LENGTH-1}"
+            await client.post(ltrim_url, headers=REDIS_HEADERS, timeout=10)
 
-        await update.message.reply_text(bot_response)
+            # 3. Получаем контекст (LRANGE)
+            lrange_url = f"{redis_url}/lrange/{redis_key}/0/{MAX_CONTEXT_LENGTH}"
+            context_response = await client.get(lrange_url, headers=REDIS_HEADERS, timeout=10)
+            
+            context_messages = []
+            if context_response.status_code == 200:
+                context_messages = context_response.json().get("result", [])
+            else:
+                logger.error(f"Redis LRANGE error: {context_response.text}")
+
+            # 4. Запрос к Hugging Face
+            hf_headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
+            payload = {
+                "inputs": {
+                    "text": user_message,
+                    "past_user_inputs": context_messages,
+                    "generated_responses": []
+                }
+            }
+
+            try:
+                hf_response = await client.post(
+                    "https://api-inference.huggingface.co/models/microsoft/DialoGPT-large",
+                    headers=hf_headers,
+                    json=payload,
+                    timeout=15
+                )
+            except httpx.TimeoutException:
+                await update.message.reply_text("Сервис перегружен ⏳")
+                return
+
+            if hf_response.status_code == 200:
+                response_data = hf_response.json()
+                bot_response = response_data.get("generated_text", "Не понимаю запрос 😕")[:4096]
+            else:
+                logger.error(f"Hugging Face API error: {hf_response.text}")
+                bot_response = "Ошибка генерации 🤖"
+
+            await update.message.reply_text(bot_response)
 
     except Exception as e:
         logger.exception("Critical error:")
@@ -132,7 +121,6 @@ def main():
         .read_timeout(30)
         .write_timeout(30)
         .connect_timeout(30)
-        .pool_timeout(30)
         .build()
     )
 
